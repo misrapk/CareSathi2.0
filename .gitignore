@@ -1,0 +1,23 @@
+# Local data and secrets
+caresathi.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Deployment and editor state
+.vercel/
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
