@@ -45,7 +45,7 @@ class CareSathiTests(unittest.TestCase):
     def test_demo_users_are_seeded(self):
         with server.connect() as db:
             users = db.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
-        self.assertEqual(users, 9)
+        self.assertEqual(users, 3)
 
     def test_password_hash_roundtrip(self):
         stored = server.password_hash("strong-password")
@@ -59,7 +59,7 @@ class CareSathiTests(unittest.TestCase):
 
     def test_shift_otp_early_end_and_payout_flow(self):
         _, family_login, family_cookie = self.request("POST", "/api/login", {"email": "family@demo.in", "password": "demo123"})
-        _, caretaker_login, caretaker_cookie = self.request("POST", "/api/login", {"email": "asha@demo.in", "password": "demo123"})
+        _, caretaker_login, caretaker_cookie = self.request("POST", "/api/login", {"email": "caretaker@demo.in", "password": "demo123"})
         self.assertEqual(family_login["user"]["role"], "family")
         self.assertEqual(caretaker_login["user"]["role"], "caretaker")
 
@@ -135,14 +135,13 @@ class CareSathiTests(unittest.TestCase):
         released_for_family = next(item for item in family_after_release if item["id"] == release_id)
         self.assertEqual(released_for_family["last_release_reason"], "Personal emergency")
 
-        _, _, second_caretaker_cookie = self.request("POST", "/api/login", {"email": "imran@demo.in", "password": "demo123"})
-        _, second_feed, _ = self.request("GET", "/api/requests", {}, second_caretaker_cookie)
-        self.assertIn(release_id, [item["id"] for item in second_feed])
+        _, caretaker_feed, _ = self.request("GET", "/api/requests", {}, caretaker_cookie)
+        self.assertIn(release_id, [item["id"] for item in caretaker_feed])
 
     def test_open_requests_are_seeded(self):
         with server.connect() as db:
             requests = db.execute("SELECT COUNT(*) n FROM care_requests WHERE status='open'").fetchone()["n"]
-        self.assertEqual(requests, 7)
+        self.assertEqual(requests, 0)
 
 
 if __name__ == "__main__":

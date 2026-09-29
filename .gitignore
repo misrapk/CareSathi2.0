@@ -1,5 +1,6 @@
 # Local data and secrets
 caresathi.db
+*.db
 *.db-wal
 *.db-shm
 .env

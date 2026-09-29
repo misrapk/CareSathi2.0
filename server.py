@@ -23,6 +23,9 @@ PUBLIC_DIR = ROOT / "public"
 DB_PATH = Path(os.environ.get("CARESATHI_DB", ROOT / "caresathi.db"))
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
+DEMO_MODE = os.environ.get("CARESATHI_DEMO_MODE", "1" if not USE_POSTGRES else "0") == "1"
+ADMIN_EMAIL = os.environ.get("CARESATHI_ADMIN_EMAIL", "").strip().lower()
+ADMIN_PASSWORD = os.environ.get("CARESATHI_ADMIN_PASSWORD", "")
 SESSION_HOURS = 72
 
 try:
@@ -167,6 +170,11 @@ def init_db() -> None:
                 credential_badge TEXT NOT NULL DEFAULT 'Companion verified',
                 credential_verified INTEGER NOT NULL DEFAULT 0,
                 rating_count INTEGER NOT NULL DEFAULT 0,
+                availability_hours TEXT NOT NULL DEFAULT 'Mon–Sun · 08:00–20:00',
+                preferred_hospitals TEXT NOT NULL DEFAULT '',
+                unavailable_dates TEXT NOT NULL DEFAULT '',
+                suspended INTEGER NOT NULL DEFAULT 0,
+                is_admin INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -199,7 +207,17 @@ def init_db() -> None:
                 end_requested INTEGER NOT NULL DEFAULT 0,
                 skill_needed TEXT NOT NULL DEFAULT 'General companionship',
                 watch_token TEXT,
-                completed_at TEXT
+                completed_at TEXT,
+                base_rate INTEGER,
+                night_surcharge INTEGER NOT NULL DEFAULT 0,
+                urgent_surcharge INTEGER NOT NULL DEFAULT 0,
+                weekend_surcharge INTEGER NOT NULL DEFAULT 0,
+                skill_surcharge INTEGER NOT NULL DEFAULT 0,
+                estimated_amount INTEGER,
+                deposit_amount INTEGER NOT NULL DEFAULT 0,
+                deposit_status TEXT NOT NULL DEFAULT 'not_paid',
+                payment_status TEXT NOT NULL DEFAULT 'not_due',
+                payment_reference TEXT
             );
             CREATE TABLE IF NOT EXISTS ratings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,6 +258,11 @@ def init_db() -> None:
             "credential_badge": "TEXT NOT NULL DEFAULT 'Companion verified'",
             "credential_verified": "INTEGER NOT NULL DEFAULT 0",
             "rating_count": "INTEGER NOT NULL DEFAULT 0",
+            "availability_hours": "TEXT NOT NULL DEFAULT 'Mon–Sun · 08:00–20:00'",
+            "preferred_hospitals": "TEXT NOT NULL DEFAULT ''",
+            "unavailable_dates": "TEXT NOT NULL DEFAULT ''",
+            "suspended": "INTEGER NOT NULL DEFAULT 0",
+            "is_admin": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in user_additions.items():
             if name not in user_columns:
@@ -253,99 +276,51 @@ def init_db() -> None:
             "end_requested": "INTEGER NOT NULL DEFAULT 0",
             "skill_needed": "TEXT NOT NULL DEFAULT 'General companionship'",
             "watch_token": "TEXT",
+            "base_rate": "INTEGER",
+            "night_surcharge": "INTEGER NOT NULL DEFAULT 0",
+            "urgent_surcharge": "INTEGER NOT NULL DEFAULT 0",
+            "weekend_surcharge": "INTEGER NOT NULL DEFAULT 0",
+            "skill_surcharge": "INTEGER NOT NULL DEFAULT 0",
+            "estimated_amount": "INTEGER",
+            "deposit_amount": "INTEGER NOT NULL DEFAULT 0",
+            "deposit_status": "TEXT NOT NULL DEFAULT 'not_paid'",
+            "payment_status": "TEXT NOT NULL DEFAULT 'not_due'",
+            "payment_reference": "TEXT",
         }
         for name, definition in request_additions.items():
             if name not in request_columns:
                 db.execute(f"ALTER TABLE care_requests ADD COLUMN {name} {definition}")
         count = db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
-        if count == 0:
-            seed(db)
-        db.execute("""UPDATE users SET headline='Experienced elder-care companion', experience_years=4,
-                    languages='Hindi, English, Marathi', hourly_rate=150 WHERE email='asha@demo.in'""")
-        db.execute("""UPDATE users SET headline='Calm and dependable night attendant', experience_years=3,
-                    languages='Hindi, English, Urdu', hourly_rate=140 WHERE email='imran@demo.in'""")
-        db.execute("""UPDATE users SET headline='Senior-care and mobility support', experience_years=6,
-                    languages='Hindi, English, Marathi, Gujarati', hourly_rate=180 WHERE email='meera@demo.in'""")
-        db.execute("""UPDATE users SET skills='Night vigil|Dementia & elder companion', credential_badge='Companion verified',
-                    credential_verified=1, rating_count=47 WHERE email='asha@demo.in'""")
-        db.execute("""UPDATE users SET skills='Night vigil|Post-op mobility', credential_badge='Allied-care credential verified',
-                    credential_verified=1, rating_count=32 WHERE email='imran@demo.in'""")
-        db.execute("""UPDATE users SET skills='Post-op mobility|Dementia & elder companion', credential_badge='Allied-care credential verified',
-                    credential_verified=1, rating_count=61 WHERE email='meera@demo.in'""")
-        seed_marketplace_samples(db)
+        if count == 0 and DEMO_MODE:
+            seed_demo_accounts(db)
+        if ADMIN_EMAIL and ADMIN_PASSWORD:
+            db.execute("""INSERT INTO users(name,email,phone,password_hash,role,city,verified,is_admin,created_at)
+                          VALUES(?,?,?,?, 'family','',1,1,?) ON CONFLICT(email) DO NOTHING""",
+                       ("CareSathi Admin", ADMIN_EMAIL, "", password_hash(ADMIN_PASSWORD), utc_now()))
         # Accepted bookings created by older versions receive a start OTP during migration.
         missing_otps = db.execute("SELECT id FROM care_requests WHERE status='accepted' AND start_otp IS NULL").fetchall()
         for request in missing_otps:
             db.execute("UPDATE care_requests SET start_otp=? WHERE id=?", (f"{secrets.randbelow(1_000_000):06d}", request["id"]))
 
 
-def seed(db: sqlite3.Connection) -> None:
+def seed_demo_accounts(db) -> None:
+    """Local-only accounts for testing roles; no patient or marketplace records are seeded."""
     created = utc_now()
     people = [
-        ("Rohan Mehta", "family@demo.in", "9876543210", "family", "Pune", 1, 0, 0),
-        ("Asha Verma", "asha@demo.in", "9876500001", "caretaker", "Pune", 1, 4.9, 47),
-        ("Imran Shaikh", "imran@demo.in", "9876500002", "caretaker", "Pune", 1, 4.8, 32),
-        ("Meera Joshi", "meera@demo.in", "9876500003", "caretaker", "Mumbai", 1, 4.9, 61),
+        ("Demo Family", "family@demo.in", "9000000001", "family", "Pune", 1, 0, 0),
+        ("Demo Caretaker", "caretaker@demo.in", "9000000002", "caretaker", "Pune", 1, 0, 0),
+        ("Demo Admin", "admin@demo.in", "9000000003", "family", "Pune", 1, 0, 0),
     ]
     for name, email, phone, role, city, verified, rating, jobs in people:
         db.execute(
             "INSERT INTO users(name,email,phone,password_hash,role,city,verified,rating,jobs_completed,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (name, email, phone, password_hash("demo123"), role, city, verified, rating, jobs, created),
         )
-    family_id = db.execute("SELECT id FROM users WHERE email='family@demo.in'").fetchone()["id"]
-    tomorrow = (datetime.now() + timedelta(days=1)).date().isoformat()
-    requests = [
-        (family_id, "Shanti Mehta", 72, "Sahyadri Super Speciality Hospital", "Pune", "Ward B · Room 204", tomorrow, "21:00", 8, 150, "Female preferred", "Companionship, help calling hospital staff, and assistance with meals."),
-        (family_id, "Mohan Kulkarni", 68, "Ruby Hall Clinic", "Pune", "Main wing · Room 318", tomorrow, "18:00", 6, 140, "Any", "Patient has limited mobility. Family will brief the attendant at handover."),
-    ]
-    db.executemany(
-        """INSERT INTO care_requests(family_id,patient_name,patient_age,hospital,city,ward_room,care_date,start_time,hours,hourly_rate,gender_preference,support_notes,status,created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?)""",
-        [(*item, created) for item in requests],
-    )
-
-
-def seed_marketplace_samples(db: sqlite3.Connection) -> None:
-    """Add idempotent demo supply and demand across the requested launch cities."""
-    created = utc_now()
-    caretakers = [
-        ("Nisha Patel", "nisha@demo.in", "9876511001", "Ahmedabad", 4.9, 54, "Patient and reassuring overnight companion", 5, "Hindi, English, Gujarati", 170, "Night vigil|Dementia & elder companion", "Companion verified"),
-        ("Arjun Desai", "arjun@demo.in", "9876511002", "Ahmedabad", 4.8, 39, "Mobility-focused recovery assistant", 4, "Hindi, English, Gujarati", 190, "Post-op mobility|Night vigil", "Allied-care credential verified"),
-        ("Kavita Sharma", "kavita@demo.in", "9876511003", "Delhi", 4.9, 72, "Experienced dementia and elder companion", 7, "Hindi, English, Punjabi", 200, "Dementia & elder companion|General companionship", "Companion verified"),
-        ("Danish Khan", "danish@demo.in", "9876511004", "Delhi", 4.7, 28, "Dependable night and recovery support", 3, "Hindi, English, Urdu", 175, "Night vigil|Post-op mobility", "Allied-care credential verified"),
-        ("Priya Singh", "priya@demo.in", "9876511005", "Lucknow", 4.8, 45, "Warm elder-care and mobility companion", 5, "Hindi, English, Awadhi", 160, "Dementia & elder companion|Post-op mobility", "Companion verified"),
-    ]
-    for name, email, phone, city, rating, jobs, headline, years, languages, rate, skills, badge in caretakers:
-        db.execute(
-            """INSERT INTO users(name,email,phone,password_hash,role,city,verified,rating,jobs_completed,headline,experience_years,languages,hourly_rate,skills,credential_badge,credential_verified,rating_count,created_at)
-               VALUES(?,?,?,?, 'caretaker', ?,1,?,?,?,?,?,?,?,?,1,?,?) ON CONFLICT(email) DO NOTHING""",
-            (name, email, phone, password_hash("demo123"), city, rating, jobs, headline, years, languages, rate, skills, badge, jobs, created),
-        )
-    family = db.execute("SELECT id FROM users WHERE email='family@demo.in'").fetchone()
-    if not family:
-        return
-    tomorrow = (datetime.now() + timedelta(days=1)).date().isoformat()
-    sample_requests = [
-        ("Leela Shah", 77, "Zydus Hospital", "Ahmedabad", "Tower A · 512", "21:00", 8, 180, "Night vigil", "Overnight companionship and nurse-call assistance."),
-        ("Harish Mehta", 66, "Apollo Hospital", "Ahmedabad", "Ward C · 208", "10:00", 5, 190, "Post-op mobility", "Walking support as directed by hospital physiotherapy staff."),
-        ("Kamla Devi", 81, "Max Super Speciality Hospital", "Delhi", "East wing · 304", "18:00", 6, 200, "Dementia & elder companion", "Calm companionship and family update support."),
-        ("Rajiv Batra", 59, "Sir Ganga Ram Hospital", "Delhi", "North wing · 220", "22:00", 8, 175, "Night vigil", "Overnight observation and communication with the ward desk."),
-        ("Savitri Singh", 74, "Medanta Hospital", "Lucknow", "Room 411", "09:00", 4, 165, "Post-op mobility", "Meal and careful mobility assistance within hospital guidance."),
-    ]
-    for patient, age, hospital, city, ward, start, hours, rate, skill, notes in sample_requests:
-        exists = db.execute("SELECT 1 FROM care_requests WHERE patient_name=? AND hospital=?", (patient, hospital)).fetchone()
-        if not exists:
-            db.execute(
-                """INSERT INTO care_requests(family_id,patient_name,patient_age,hospital,city,ward_room,care_date,start_time,hours,hourly_rate,gender_preference,support_notes,status,skill_needed,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?, 'Any',?, 'open',?,?)""",
-                (family["id"], patient, age, hospital, city, ward, tomorrow, start, hours, rate, notes, skill, created),
-            )
-        else:
-            db.execute("UPDATE care_requests SET city=?,ward_room=?,skill_needed=? WHERE patient_name=? AND hospital=?", (city, ward, skill, patient, hospital))
+    db.execute("UPDATE users SET is_admin=1 WHERE email='admin@demo.in'")
 
 
 def user_dict(row: sqlite3.Row) -> dict:
-    return {key: row[key] for key in ("id", "name", "email", "phone", "role", "city", "verified", "rating", "rating_count", "jobs_completed", "skills", "credential_badge", "credential_verified")}
+    return {key: row[key] for key in ("id", "name", "email", "phone", "role", "city", "verified", "rating", "rating_count", "jobs_completed", "skills", "credential_badge", "credential_verified", "availability_hours", "preferred_hospitals", "unavailable_dates", "suspended", "is_admin")}
 
 
 def request_dict(row: sqlite3.Row, include_otp: bool = False) -> dict:
@@ -353,6 +328,24 @@ def request_dict(row: sqlite3.Row, include_otp: bool = False) -> dict:
     if not include_otp:
         data.pop("start_otp", None)
     return data
+
+
+def pricing_for(care_date: str, start_time: str, hours: int, hourly_rate: int, skill_needed: str, urgent: bool = False) -> dict:
+    """Return a transparent, deterministic estimate for the demo checkout."""
+    base = hourly_rate * hours
+    try:
+        is_weekend = datetime.fromisoformat(care_date).weekday() >= 5
+    except ValueError:
+        is_weekend = False
+    is_night = start_time < "06:00" or start_time >= "22:00"
+    night = round(base * .20) if is_night else 0
+    weekend = round(base * .10) if is_weekend else 0
+    skill = round(base * .15) if skill_needed not in ("", "Any", "General companionship") else 0
+    urgency = round(base * .15) if urgent else 0
+    estimate = base + night + weekend + skill + urgency
+    return {"base_rate": base, "night_surcharge": night, "weekend_surcharge": weekend,
+            "skill_surcharge": skill, "urgent_surcharge": urgency, "estimated_amount": estimate,
+            "deposit_amount": max(50, round(estimate * .20))}
 
 
 class ApiError(Exception):
@@ -422,10 +415,20 @@ class CareSathiHandler(SimpleHTTPRequestHandler):
                 with connect() as db:
                     db.execute("SELECT 1").fetchone()
                 return self.send_json({"ok": True, "database": "postgres" if USE_POSTGRES else "sqlite"})
+            if path == "/api/config":
+                return self.send_json({"demo_mode": DEMO_MODE})
             if path == "/api/requests":
                 return self.handle_requests_list()
             if path == "/api/caretakers":
                 return self.handle_caretakers_list()
+            if path == "/api/availability":
+                return self.handle_availability_get()
+            if path == "/api/earnings":
+                return self.handle_earnings()
+            if path == "/api/admin/overview":
+                return self.handle_admin_overview()
+            if len(parts) == 4 and parts[:2] == ["api", "requests"] and parts[3] == "invoice":
+                return self.handle_invoice(int(parts[2]))
             if path == "/api/stats":
                 with connect() as db:
                     stats = {
@@ -452,11 +455,15 @@ class CareSathiHandler(SimpleHTTPRequestHandler):
                 return self.handle_logout()
             if path == "/api/requests":
                 return self.handle_create_request()
+            if path == "/api/availability":
+                return self.handle_availability_save()
             parts = path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "watch"] and parts[3] == "join":
                 return self.handle_watch_join(parts[2])
-            if len(parts) == 4 and parts[:2] == ["api", "requests"] and parts[3] in {"accept", "start", "complete", "cancel", "release", "request_end", "rate", "watch_link"}:
+            if len(parts) == 4 and parts[:2] == ["api", "requests"] and parts[3] in {"accept", "start", "complete", "cancel", "release", "request_end", "rate", "watch_link", "pay_deposit", "settle_payment"}:
                 return self.handle_request_action(int(parts[2]), parts[3])
+            if len(parts) == 5 and parts[:2] == ["api", "admin"] and parts[2] == "users" and parts[4] in {"approve", "suspend"}:
+                return self.handle_admin_user_action(int(parts[3]), parts[4])
             raise ApiError(404, "Not found")
         except ValueError:
             self.send_json({"error": "Invalid request id"}, 400)
@@ -557,8 +564,8 @@ class CareSathiHandler(SimpleHTTPRequestHandler):
         with connect() as db:
             rows = db.execute(
                 """SELECT id,name,city,verified,rating,rating_count,jobs_completed,headline,experience_years,languages,hourly_rate,
-                          skills,credential_badge,credential_verified
-                   FROM users WHERE role='caretaker'
+                          skills,credential_badge,credential_verified,availability_hours,preferred_hospitals,unavailable_dates
+                   FROM users WHERE role='caretaker' AND suspended=0
                    ORDER BY verified DESC, rating DESC, jobs_completed DESC""",
             ).fetchall()
         ordered = sorted(rows, key=lambda row: (not cities_match(user["city"], row["city"]), -row["verified"], -row["rating"], -row["jobs_completed"]))
@@ -568,6 +575,81 @@ class CareSathiHandler(SimpleHTTPRequestHandler):
             item["nearby"] = cities_match(user["city"], row["city"])
             payload.append(item)
         self.send_json(payload)
+
+    def handle_availability_get(self) -> None:
+        user = self.require_role("caretaker")
+        self.send_json({"availability_hours": user["availability_hours"], "preferred_hospitals": user["preferred_hospitals"],
+                        "unavailable_dates": user["unavailable_dates"]})
+
+    def handle_availability_save(self) -> None:
+        user = self.require_role("caretaker")
+        data = self.body_json()
+        hours = str(data.get("availability_hours", "")).strip()[:120]
+        hospitals = str(data.get("preferred_hospitals", "")).strip()[:500]
+        dates = str(data.get("unavailable_dates", "")).strip()[:500]
+        if not hours:
+            raise ApiError(400, "Please add your usual working hours")
+        with connect() as db:
+            db.execute("UPDATE users SET availability_hours=?, preferred_hospitals=?, unavailable_dates=? WHERE id=?",
+                       (hours, hospitals, dates, user["id"]))
+            updated = db.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+        self.send_json({"user": user_dict(updated)})
+
+    def handle_earnings(self) -> None:
+        user = self.require_role("caretaker")
+        with connect() as db:
+            rows = db.execute("""SELECT id,patient_name,hospital,care_date,completed_at,actual_minutes,final_amount,payment_status,
+                                      (SELECT stars FROM ratings WHERE request_id=care_requests.id AND ratee_id=?) rating
+                               FROM care_requests WHERE caretaker_id=? AND status='completed' ORDER BY completed_at DESC""",
+                              (user["id"], user["id"])).fetchall()
+        total = sum(int(row["final_amount"] or 0) for row in rows)
+        pending = sum(int(row["final_amount"] or 0) for row in rows if row["payment_status"] != "paid")
+        week_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+        weekly = sum(int(row["final_amount"] or 0) for row in rows if (row["completed_at"] or "") >= week_cutoff)
+        self.send_json({"total_earned": total, "weekly_earned": weekly, "pending_payout": pending,
+                        "completed_shifts": len(rows), "items": [dict(row) for row in rows]})
+
+    def handle_invoice(self, request_id: int) -> None:
+        user = self.current_user()
+        with connect() as db:
+            row = db.execute("""SELECT r.*,f.name family_name,f.email family_email,c.name caretaker_name
+                                FROM care_requests r JOIN users f ON f.id=r.family_id LEFT JOIN users c ON c.id=r.caretaker_id WHERE r.id=?""", (request_id,)).fetchone()
+        if not row or user["id"] not in (row["family_id"], row["caretaker_id"]) and not user["is_admin"]:
+            raise ApiError(403, "You cannot access this invoice")
+        total = row["final_amount"] or row["estimated_amount"] or row["hourly_rate"] * row["hours"]
+        self.send_json({"invoice_no": f"CS-{row['id']:05d}", "issued_at": row["completed_at"] or row["created_at"],
+                        "patient_name": row["patient_name"], "hospital": row["hospital"], "care_date": row["care_date"],
+                        "family_name": row["family_name"], "caretaker_name": row["caretaker_name"] or "Pending assignment",
+                        "base_rate": row["base_rate"] or row["hourly_rate"] * row["hours"], "night_surcharge": row["night_surcharge"],
+                        "weekend_surcharge": row["weekend_surcharge"], "skill_surcharge": row["skill_surcharge"], "urgent_surcharge": row["urgent_surcharge"],
+                        "deposit_amount": row["deposit_amount"], "total": total, "payment_status": row["payment_status"]})
+
+    def handle_admin_overview(self) -> None:
+        admin = self.current_user()
+        if not admin["is_admin"]:
+            raise ApiError(403, "Admin access is required")
+        with connect() as db:
+            users = db.execute("SELECT id,name,email,role,city,verified,suspended,rating,jobs_completed,created_at FROM users WHERE is_admin=0 ORDER BY created_at DESC").fetchall()
+            requests = db.execute("SELECT status,COUNT(*) total FROM care_requests GROUP BY status").fetchall()
+            ratings = db.execute("SELECT COUNT(*) total,COALESCE(AVG(stars),0) average FROM ratings").fetchone()
+            payments = db.execute("SELECT COALESCE(SUM(final_amount),0) paid_volume, COUNT(*) completed FROM care_requests WHERE status='completed'").fetchone()
+        self.send_json({"users": [dict(row) for row in users], "request_statuses": {row["status"]:row["total"] for row in requests},
+                        "ratings": dict(ratings), "payments": dict(payments)})
+
+    def handle_admin_user_action(self, user_id: int, action: str) -> None:
+        admin = self.current_user()
+        if not admin["is_admin"]:
+            raise ApiError(403, "Admin access is required")
+        with connect() as db:
+            target = db.execute("SELECT * FROM users WHERE id=? AND is_admin=0", (user_id,)).fetchone()
+            if not target:
+                raise ApiError(404, "User not found")
+            if action == "approve":
+                db.execute("UPDATE users SET verified=1 WHERE id=?", (user_id,))
+            else:
+                db.execute("UPDATE users SET suspended=CASE suspended WHEN 1 THEN 0 ELSE 1 END WHERE id=?", (user_id,))
+            target = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        self.send_json({"user": user_dict(target)})
 
     def handle_create_request(self) -> None:
         user = self.require_role("family")
@@ -581,11 +663,12 @@ class CareSathiHandler(SimpleHTTPRequestHandler):
             raise ApiError(400, "Age, hours, and rate must be numbers")
         if not (1 <= age <= 120 and 1 <= hours <= 24 and 50 <= rate <= 5000):
             raise ApiError(400, "Please check age, duration, and hourly rate")
+        pricing = pricing_for(data["care_date"], data["start_time"], hours, rate, data.get("skill_needed", "General companionship"), bool(data.get("urgent")))
         with connect() as db:
             request_id = insert_and_get_id(db,
-                """INSERT INTO care_requests(family_id,patient_name,patient_age,hospital,city,ward_room,care_date,start_time,hours,hourly_rate,gender_preference,support_notes,status,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?)""",
-                (user["id"], data["patient_name"].strip(), age, data["hospital"].strip(), data["city"].strip(), data["ward_room"].strip(), data["care_date"], data["start_time"], hours, rate, data.get("gender_preference", "Any"), data.get("support_notes", "").strip(), utc_now()),
+                """INSERT INTO care_requests(family_id,patient_name,patient_age,hospital,city,ward_room,care_date,start_time,hours,hourly_rate,gender_preference,support_notes,status,created_at,base_rate,night_surcharge,weekend_surcharge,skill_surcharge,urgent_surcharge,estimated_amount,deposit_amount)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?,?,?,?,?,?,?,?)""",
+                (user["id"], data["patient_name"].strip(), age, data["hospital"].strip(), data["city"].strip(), data["ward_room"].strip(), data["care_date"], data["start_time"], hours, rate, data.get("gender_preference", "Any"), data.get("support_notes", "").strip(), utc_now(), pricing["base_rate"], pricing["night_surcharge"], pricing["weekend_surcharge"], pricing["skill_surcharge"], pricing["urgent_surcharge"], pricing["estimated_amount"], pricing["deposit_amount"]),
             )
             db.execute("UPDATE care_requests SET skill_needed=? WHERE id=?", (data.get("skill_needed", "General companionship"), request_id))
             row = db.execute("SELECT * FROM care_requests WHERE id=?", (request_id,)).fetchone()
@@ -623,7 +706,7 @@ class CareSathiHandler(SimpleHTTPRequestHandler):
                 token = request["watch_token"] or secrets.token_urlsafe(24)
                 db.execute("UPDATE care_requests SET watch_token=? WHERE id=?", (token, request_id))
             elif action == "accept":
-                if user["role"] != "caretaker" or request["status"] != "open":
+                if user["role"] != "caretaker" or user["suspended"] or request["status"] != "open":
                     raise ApiError(409, "This request is no longer available")
                 otp = f"{secrets.randbelow(1_000_000):06d}"
                 result = db.execute(
@@ -647,16 +730,35 @@ class CareSathiHandler(SimpleHTTPRequestHandler):
                 started_at = datetime.fromisoformat(request["started_at"])
                 elapsed_seconds = max(1, int((completed_at - started_at).total_seconds()))
                 actual_minutes = max(1, (elapsed_seconds + 59) // 60)
-                final_amount = max(1, round(request["hourly_rate"] * actual_minutes / 60))
+                base_for_time = max(1, round(request["hourly_rate"] * actual_minutes / 60))
+                booked_base = request["base_rate"] or request["hourly_rate"] * request["hours"]
+                ratio = base_for_time / booked_base
+                extras = sum(int(request[key] or 0) for key in ("night_surcharge", "weekend_surcharge", "skill_surcharge", "urgent_surcharge"))
+                final_amount = base_for_time + round(extras * ratio)
                 db.execute(
-                    "UPDATE care_requests SET status='completed', completed_at=?, actual_minutes=?, final_amount=? WHERE id=?",
+                    "UPDATE care_requests SET status='completed', completed_at=?, actual_minutes=?, final_amount=?, payment_status=CASE WHEN deposit_status='paid' THEN 'balance_due' ELSE 'payment_due' END WHERE id=?",
                     (completed_at.isoformat(timespec="seconds"), actual_minutes, final_amount, request_id),
                 )
                 db.execute("UPDATE users SET jobs_completed=jobs_completed+1 WHERE id=?", (user["id"],))
             elif action == "cancel":
                 if request["family_id"] != user["id"] or request["status"] not in ("open", "accepted"):
                     raise ApiError(403, "This request cannot be cancelled")
-                db.execute("UPDATE care_requests SET status='cancelled' WHERE id=?", (request_id,))
+                payment_status = "refunded" if request["deposit_status"] == "paid" else "cancelled"
+                db.execute("UPDATE care_requests SET status='cancelled', payment_status=? WHERE id=?", (payment_status, request_id))
+            elif action == "pay_deposit":
+                if request["family_id"] != user["id"] or request["status"] not in ("open", "accepted"):
+                    raise ApiError(403, "A deposit can only be paid by the patient's family before the shift")
+                if request["deposit_status"] == "paid":
+                    raise ApiError(409, "The booking deposit is already paid")
+                ref = f"DEMO-DEP-{request_id}-{secrets.randbelow(9000)+1000}"
+                db.execute("UPDATE care_requests SET deposit_status='paid', payment_status='deposit_paid', payment_reference=? WHERE id=?", (ref, request_id))
+            elif action == "settle_payment":
+                if request["family_id"] != user["id"] or request["status"] != "completed":
+                    raise ApiError(403, "Only the patient's family can settle a completed shift")
+                if request["payment_status"] == "paid":
+                    raise ApiError(409, "This shift has already been paid")
+                ref = request["payment_reference"] or f"DEMO-PAY-{request_id}-{secrets.randbelow(9000)+1000}"
+                db.execute("UPDATE care_requests SET payment_status='paid', payment_reference=? WHERE id=?", (ref, request_id))
             elif action == "release":
                 if request["caretaker_id"] != user["id"] or request["status"] != "accepted":
                     raise ApiError(403, "Only the assigned CareSathi can release a shift before it starts")
